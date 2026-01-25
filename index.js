@@ -156,45 +156,40 @@ app.get('/api/composer/products', async (req, res) => {
   }
 
   try {
-    // Query GraphQL per trovare prodotti con la promo specifica
+    // Query GraphQL usando referencedBy per trovare i prodotti che referenziano la promo
     const query = `
-      query GetProductsByPromo($query: String!) {
-        products(first: 50, query: $query) {
-          edges {
-            node {
-              id
-              title
-              handle
-              featuredImage {
-                url
-              }
-              priceRange {
-                minVariantPrice {
-                  amount
-                  currencyCode
-                }
-              }
-              variants(first: 20) {
-                edges {
-                  node {
+      query GetPromoProducts($handle: String!) {
+        metaobjectByHandle(handle: {type: "promozione", handle: $handle}) {
+          id
+          handle
+          fields {
+            key
+            value
+          }
+          referencedBy(first: 50) {
+            edges {
+              node {
+                referencer {
+                  ... on Product {
                     id
                     title
-                    availableForSale
-                    price
-                  }
-                }
-              }
-              metafield(namespace: "custom", key: "promozione") {
-                value
-                references(first: 10) {
-                  edges {
-                    node {
-                      ... on Metaobject {
-                        id
-                        handle
-                        fields {
-                          key
-                          value
+                    handle
+                    featuredImage {
+                      url
+                    }
+                    priceRange {
+                      minVariantPrice {
+                        amount
+                        currencyCode
+                      }
+                    }
+                    variants(first: 20) {
+                      edges {
+                        node {
+                          id
+                          title
+                          availableForSale
+                          price
                         }
                       }
                     }
@@ -207,7 +202,6 @@ app.get('/api/composer/products', async (req, res) => {
       }
     `;
 
-    // Prima otteniamo tutti i prodotti che hanno il metafield promozione
     const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2026-01/graphql.json`, {
       method: 'POST',
       headers: {
@@ -217,7 +211,7 @@ app.get('/api/composer/products', async (req, res) => {
       body: JSON.stringify({
         query,
         variables: {
-          query: `metafield.custom.promozione:*`
+          handle: promo_id
         }
       }),
     });
@@ -228,20 +222,28 @@ app.get('/api/composer/products', async (req, res) => {
       return res.status(400).json({ errors: data.errors });
     }
 
-    // Filtra i prodotti che hanno la promo con l'ID specifico
-    const products = data.data?.products?.edges
-      ?.map(edge => edge.node)
-      ?.filter(product => {
-        const promoRefs = product.metafield?.references?.edges || [];
-        return promoRefs.some(ref => {
-          const fields = ref.node?.fields || [];
-          const idField = fields.find(f => f.key === 'id_promo' || f.key === 'id');
-          return idField?.value === promo_id;
-        });
-      }) || [];
+    const metaobject = data.data?.metaobjectByHandle;
+
+    if (!metaobject) {
+      return res.json({
+        promo_id,
+        count: 0,
+        products: [],
+        message: 'Promo non trovata'
+      });
+    }
+
+    // Estrai i prodotti dalle references
+    const products = metaobject.referencedBy?.edges
+      ?.map(edge => edge.node?.referencer)
+      ?.filter(p => p && p.id) || [];
+
+    // Estrai info promo
+    const promoName = metaobject.fields?.find(f => f.key === 'name')?.value;
 
     res.json({
       promo_id,
+      promo_name: promoName,
       count: products.length,
       products: products.map(p => ({
         id: p.id,
