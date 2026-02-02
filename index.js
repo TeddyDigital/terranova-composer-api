@@ -244,7 +244,23 @@ let fulfillmentLocationsCache = null;
 let fulfillmentLocationsCacheTime = 0;
 const LOCATIONS_CACHE_TTL = 5 * 60 * 1000;
 
-// Ottiene le location che fulfillano ordini online
+// Mappatura manuale country → location IDs (configurabile via env)
+// Formato: COUNTRY_LOCATIONS=IT:gid://shopify/Location/123,FR:gid://shopify/Location/456
+function getCountryLocationMap() {
+  const envMap = process.env.COUNTRY_LOCATIONS;
+  if (!envMap) return {};
+
+  const map = {};
+  envMap.split(',').forEach(pair => {
+    const [country, locationId] = pair.split(':');
+    if (country && locationId) {
+      map[country.trim().toUpperCase()] = locationId.trim();
+    }
+  });
+  return map;
+}
+
+// Ottiene le location che fulfillano ordini online (con info country)
 async function getFulfillmentLocations(token) {
   const now = Date.now();
   if (fulfillmentLocationsCache && (now - fulfillmentLocationsCacheTime) < LOCATIONS_CACHE_TTL) {
@@ -259,6 +275,9 @@ async function getFulfillmentLocations(token) {
             id
             name
             fulfillsOnlineOrders
+            address {
+              countryCode
+            }
           }
         }
       }
@@ -279,23 +298,38 @@ async function getFulfillmentLocations(token) {
 
     if (data.errors) {
       console.error('Errore query locations:', data.errors);
-      return [];
+      return { all: [], byCountry: {} };
     }
 
     const locations = data.data?.locations?.edges?.map(e => e.node) || [];
 
     // Filtra solo le location che fulfillano ordini online
-    fulfillmentLocationsCache = locations
-      .filter(l => l.fulfillsOnlineOrders)
-      .map(l => l.id);
+    const fulfillmentLocations = locations.filter(l => l.fulfillsOnlineOrders);
+
+    // Raggruppa per country code
+    const byCountry = {};
+    for (const loc of fulfillmentLocations) {
+      const countryCode = loc.address?.countryCode;
+      if (countryCode) {
+        if (!byCountry[countryCode]) {
+          byCountry[countryCode] = [];
+        }
+        byCountry[countryCode].push(loc.id);
+      }
+    }
+
+    fulfillmentLocationsCache = {
+      all: fulfillmentLocations.map(l => l.id),
+      byCountry
+    };
 
     fulfillmentLocationsCacheTime = now;
-    console.log(`Cached ${fulfillmentLocationsCache.length} fulfillment locations`);
+    console.log(`Cached ${fulfillmentLocationsCache.all.length} fulfillment locations:`, byCountry);
 
     return fulfillmentLocationsCache;
   } catch (error) {
     console.error('Errore getFulfillmentLocations:', error);
-    return [];
+    return { all: [], byCountry: {} };
   }
 }
 
@@ -351,6 +385,59 @@ app.get('/token-status', (req, res) => {
   });
 });
 
+// Debug: mostra tutte le location
+app.get('/api/debug/locations', async (req, res) => {
+  const token = await getValidToken();
+  if (!token) {
+    return res.status(401).json({ error: 'Token mancante' });
+  }
+
+  const query = `
+    query GetLocations {
+      locations(first: 50, includeLegacy: true, includeInactive: false) {
+        edges {
+          node {
+            id
+            name
+            fulfillsOnlineOrders
+            address {
+              country
+              countryCode
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2026-01/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': token,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const data = await response.json();
+    const locations = data.data?.locations?.edges?.map(e => e.node) || [];
+
+    res.json({
+      count: locations.length,
+      locations: locations.map(l => ({
+        id: l.id,
+        name: l.name,
+        fulfillsOnlineOrders: l.fulfillsOnlineOrders,
+        country: l.address?.country,
+        countryCode: l.address?.countryCode
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Ottieni prodotti per promo ID
 app.get('/api/composer/products', async (req, res) => {
   const { promo_id, country } = req.query;
@@ -369,7 +456,29 @@ app.get('/api/composer/products', async (req, res) => {
 
   try {
     // Ottieni le location di fulfillment
-    const fulfillmentLocationIds = await getFulfillmentLocations(token);
+    const fulfillmentLocations = await getFulfillmentLocations(token);
+
+    // Determina quali location usare per il calcolo availability
+    let targetLocationIds = fulfillmentLocations.all;
+
+    // Se è specificato un country, filtra per le location di quel paese
+    if (country) {
+      const countryUpper = country.toUpperCase();
+
+      // Prima controlla la mappatura manuale (env var)
+      const manualMap = getCountryLocationMap();
+      if (manualMap[countryUpper]) {
+        targetLocationIds = [manualMap[countryUpper]];
+        console.log(`Using manual location mapping for ${countryUpper}:`, targetLocationIds);
+      }
+      // Altrimenti usa le location del paese
+      else if (fulfillmentLocations.byCountry[countryUpper]) {
+        targetLocationIds = fulfillmentLocations.byCountry[countryUpper];
+        console.log(`Using country-based locations for ${countryUpper}:`, targetLocationIds);
+      } else {
+        console.log(`No specific locations for ${countryUpper}, using all:`, targetLocationIds);
+      }
+    }
 
     // Query GraphQL con inventoryLevels per availability reale per location
     const query = `
@@ -490,12 +599,12 @@ app.get('/api/composer/products', async (req, res) => {
           const inventoryPolicy = variant.inventoryPolicy || 'DENY';
           const inventoryLevels = variant.inventoryItem?.inventoryLevels?.edges || [];
 
-          // Calcola l'inventario disponibile dalle location di fulfillment
+          // Calcola l'inventario disponibile dalle location target (filtrate per country se specificato)
           let totalAvailable = 0;
           for (const level of inventoryLevels) {
             const locationId = level.node?.location?.id;
-            // Filtra solo le location di fulfillment (se disponibili)
-            if (fulfillmentLocationIds.length === 0 || fulfillmentLocationIds.includes(locationId)) {
+            // Filtra solo le location target
+            if (targetLocationIds.length === 0 || targetLocationIds.includes(locationId)) {
               const availableQty = level.node?.quantities?.find(q => q.name === 'available')?.quantity || 0;
               totalAvailable += availableQty;
             }
