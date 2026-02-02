@@ -160,7 +160,7 @@ function verifyHmac(query) {
 
 // Step 1: Inizia il flusso OAuth
 app.get('/auth', (req, res) => {
-  const scopes = 'read_products,read_metaobjects,read_customers,read_orders';
+  const scopes = 'read_products,read_metaobjects,read_customers,read_orders,read_inventory,read_locations';
   const baseUrl = APP_URL || `http://localhost:${PORT}`;
   const redirectUri = `${baseUrl}/auth/callback`;
   const nonce = crypto.randomBytes(16).toString('hex');
@@ -236,6 +236,70 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 // ============================================
+// CACHE FULFILLMENT LOCATIONS
+// ============================================
+
+// Cache per le location di fulfillment (TTL 5 minuti)
+let fulfillmentLocationsCache = null;
+let fulfillmentLocationsCacheTime = 0;
+const LOCATIONS_CACHE_TTL = 5 * 60 * 1000;
+
+// Ottiene le location che fulfillano ordini online
+async function getFulfillmentLocations(token) {
+  const now = Date.now();
+  if (fulfillmentLocationsCache && (now - fulfillmentLocationsCacheTime) < LOCATIONS_CACHE_TTL) {
+    return fulfillmentLocationsCache;
+  }
+
+  const query = `
+    query GetLocations {
+      locations(first: 20, includeLegacy: true, includeInactive: false) {
+        edges {
+          node {
+            id
+            name
+            fulfillsOnlineOrders
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2026-01/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': token,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const data = await response.json();
+
+    if (data.errors) {
+      console.error('Errore query locations:', data.errors);
+      return [];
+    }
+
+    const locations = data.data?.locations?.edges?.map(e => e.node) || [];
+
+    // Filtra solo le location che fulfillano ordini online
+    fulfillmentLocationsCache = locations
+      .filter(l => l.fulfillsOnlineOrders)
+      .map(l => l.id);
+
+    fulfillmentLocationsCacheTime = now;
+    console.log(`Cached ${fulfillmentLocationsCache.length} fulfillment locations`);
+
+    return fulfillmentLocationsCache;
+  } catch (error) {
+    console.error('Errore getFulfillmentLocations:', error);
+    return [];
+  }
+}
+
+// ============================================
 // API ENDPOINTS
 // ============================================
 
@@ -289,7 +353,7 @@ app.get('/token-status', (req, res) => {
 
 // Ottieni prodotti per promo ID
 app.get('/api/composer/products', async (req, res) => {
-  const { promo_id } = req.query;
+  const { promo_id, country } = req.query;
 
   if (!promo_id) {
     return res.status(400).json({ error: 'promo_id richiesto' });
@@ -304,7 +368,10 @@ app.get('/api/composer/products', async (req, res) => {
   }
 
   try {
-    // Query GraphQL usando referencedBy per trovare i prodotti che referenziano la promo
+    // Ottieni le location di fulfillment
+    const fulfillmentLocationIds = await getFulfillmentLocations(token);
+
+    // Query GraphQL con inventoryLevels per availability reale per location
     const query = `
       query GetPromoProducts($handle: String!) {
         metaobjectByHandle(handle: {type: "promozione", handle: $handle}) {
@@ -338,6 +405,23 @@ app.get('/api/composer/products', async (req, res) => {
                           title
                           availableForSale
                           price
+                          inventoryPolicy
+                          inventoryItem {
+                            tracked
+                            inventoryLevels(first: 10) {
+                              edges {
+                                node {
+                                  quantities(names: ["available"]) {
+                                    name
+                                    quantity
+                                  }
+                                  location {
+                                    id
+                                  }
+                                }
+                              }
+                            }
+                          }
                         }
                       }
                     }
@@ -392,6 +476,7 @@ app.get('/api/composer/products', async (req, res) => {
     res.json({
       promo_id,
       promo_name: promoName,
+      country: country || null,
       count: products.length,
       products: products.map(p => ({
         id: p.id,
@@ -399,12 +484,43 @@ app.get('/api/composer/products', async (req, res) => {
         handle: p.handle,
         image: p.featuredImage?.url,
         price: p.priceRange?.minVariantPrice,
-        variants: p.variants?.edges?.map(v => ({
-          id: v.node.id,
-          title: v.node.title,
-          available: v.node.availableForSale,
-          price: v.node.price
-        }))
+        variants: p.variants?.edges?.map(v => {
+          const variant = v.node;
+          const tracked = variant.inventoryItem?.tracked ?? true;
+          const inventoryPolicy = variant.inventoryPolicy || 'DENY';
+          const inventoryLevels = variant.inventoryItem?.inventoryLevels?.edges || [];
+
+          // Calcola l'inventario disponibile dalle location di fulfillment
+          let totalAvailable = 0;
+          for (const level of inventoryLevels) {
+            const locationId = level.node?.location?.id;
+            // Filtra solo le location di fulfillment (se disponibili)
+            if (fulfillmentLocationIds.length === 0 || fulfillmentLocationIds.includes(locationId)) {
+              const availableQty = level.node?.quantities?.find(q => q.name === 'available')?.quantity || 0;
+              totalAvailable += availableQty;
+            }
+          }
+
+          // Calcolo availability:
+          // - Se non tracciato → disponibile
+          // - Se policy CONTINUE → disponibile (overselling consentito)
+          // - Se policy DENY → disponibile solo se qty > 0
+          let available;
+          if (!tracked) {
+            available = true;
+          } else if (inventoryPolicy === 'CONTINUE') {
+            available = true;
+          } else {
+            available = totalAvailable > 0;
+          }
+
+          return {
+            id: variant.id,
+            title: variant.title,
+            available,
+            price: variant.price
+          };
+        })
       }))
     });
 
