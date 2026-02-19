@@ -620,7 +620,7 @@ app.get('/api/composer/products', async (req, res) => {
                     featuredImage {
                       url
                     }
-                    metafield(namespace: "custom", key: "modello") {
+                    modello: metafield(namespace: "custom", key: "modello") {
                       value
                     }
                     colore: metafield(namespace: "custom", key: "colore") {
@@ -702,7 +702,7 @@ app.get('/api/composer/products', async (req, res) => {
         id: p.id,
         title: p.title,
         handle: p.handle,
-        modello: p.metafield?.value || null,
+        modello: p.modello?.value || null,
         colore: p.colore?.value || null,
         image: p.featuredImage?.url,
         price: p.priceRange?.minVariantPrice,
