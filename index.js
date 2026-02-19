@@ -620,6 +620,9 @@ app.get('/api/composer/products', async (req, res) => {
                     featuredImage {
                       url
                     }
+                    metafield(namespace: "custom", key: "modello") {
+                      value
+                    }
                     priceRange {
                       minVariantPrice {
                         amount
@@ -696,6 +699,7 @@ app.get('/api/composer/products', async (req, res) => {
         id: p.id,
         title: p.title,
         handle: p.handle,
+        modello: p.metafield?.value || null,
         image: p.featuredImage?.url,
         price: p.priceRange?.minVariantPrice,
         variants: p.variants?.edges?.map(v => {
