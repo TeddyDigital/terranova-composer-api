@@ -658,6 +658,52 @@ app.get('/api/debug/locations', async (req, res) => {
   }
 });
 
+// Debug: mostra market publications e dati per un prodotto specifico
+app.get('/api/debug/markets', async (req, res) => {
+  const { product_id } = req.query;
+
+  try {
+    const marketPubs = await getMarketPublications();
+
+    let productPublications = null;
+    if (product_id) {
+      const gid = product_id.startsWith('gid://') ? product_id : `gid://shopify/Product/${product_id}`;
+      const query = `
+        query GetProductPublications($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            resourcePublicationsV2(first: 20) {
+              edges {
+                node {
+                  publication {
+                    id
+                    name
+                  }
+                  isPublished
+                }
+              }
+            }
+          }
+        }
+      `;
+      const data = await shopifyGraphQL(query, { id: gid });
+      productPublications = data.data?.product;
+    }
+
+    res.json({
+      marketPublicationsByCountry: marketPubs,
+      product: productPublications
+    });
+  } catch (error) {
+    console.error('Errore debug markets:', error.message);
+    if (error.message === 'NO_TOKEN' || error.message === 'TOKEN_EXPIRED') {
+      return res.status(401).json({ error: 'Token mancante o scaduto' });
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Ottieni prodotti per promo ID
 app.get('/api/composer/products', async (req, res) => {
   const { promo_id, country } = req.query;
