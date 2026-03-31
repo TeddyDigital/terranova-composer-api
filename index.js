@@ -430,6 +430,99 @@ async function getFulfillmentLocations() {
 }
 
 // ============================================
+// CACHE MARKET PUBLICATIONS (per filtrare prodotti per country)
+// ============================================
+
+let marketPublicationsCache = null;
+let marketPublicationsCacheTime = 0;
+const MARKETS_CACHE_TTL = 5 * 60 * 1000;
+
+// Mappa country code → publication IDs dei market che servono quel paese
+async function getMarketPublications() {
+  const now = Date.now();
+  if (marketPublicationsCache && (now - marketPublicationsCacheTime) < MARKETS_CACHE_TTL) {
+    return marketPublicationsCache;
+  }
+
+  const query = `
+    query GetMarkets {
+      markets(first: 50) {
+        edges {
+          node {
+            id
+            name
+            enabled
+            regions(first: 50) {
+              edges {
+                node {
+                  ... on MarketRegionCountry {
+                    code
+                  }
+                }
+              }
+            }
+            catalogs(first: 5) {
+              edges {
+                node {
+                  publication {
+                    id
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await shopifyGraphQL(query);
+
+    if (data.errors) {
+      console.error('Errore query markets:', data.errors);
+      return {};
+    }
+
+    const markets = data.data?.markets?.edges?.map(e => e.node) || [];
+    const byCountry = {};
+
+    for (const market of markets) {
+      if (!market.enabled) continue;
+
+      const publicationIds = market.catalogs?.edges
+        ?.map(e => e.node?.publication?.id)
+        ?.filter(Boolean) || [];
+
+      if (publicationIds.length === 0) continue;
+
+      const countryCodes = market.regions?.edges
+        ?.map(e => e.node?.code)
+        ?.filter(Boolean) || [];
+
+      for (const code of countryCodes) {
+        if (!byCountry[code]) {
+          byCountry[code] = [];
+        }
+        byCountry[code].push(...publicationIds);
+      }
+    }
+
+    marketPublicationsCache = byCountry;
+    marketPublicationsCacheTime = now;
+    console.log('Cached market publications by country:', Object.keys(byCountry));
+
+    return marketPublicationsCache;
+  } catch (error) {
+    console.error('Errore getMarketPublications:', error.message);
+    if (error.message === 'NO_TOKEN' || error.message === 'TOKEN_EXPIRED') {
+      throw error;
+    }
+    return {};
+  }
+}
+
+// ============================================
 // API ENDPOINTS
 // ============================================
 
@@ -632,6 +725,16 @@ app.get('/api/composer/products', async (req, res) => {
                         currencyCode
                       }
                     }
+                    resourcePublicationsV2(first: 20) {
+                      edges {
+                        node {
+                          publication {
+                            id
+                          }
+                          isPublished
+                        }
+                      }
+                    }
                     variants(first: 20) {
                       edges {
                         node {
@@ -686,9 +789,30 @@ app.get('/api/composer/products', async (req, res) => {
     }
 
     // Estrai i prodotti dalle references
-    const products = metaobject.referencedBy?.edges
+    let products = metaobject.referencedBy?.edges
       ?.map(edge => edge.node?.referencer)
       ?.filter(p => p && p.id) || [];
+
+    // Filtra prodotti per market/country: solo quelli pubblicati nel market del paese richiesto
+    if (country) {
+      const countryUpper = country.toUpperCase();
+      const marketPubs = await getMarketPublications();
+      const countryPublicationIds = marketPubs[countryUpper];
+
+      if (countryPublicationIds && countryPublicationIds.length > 0) {
+        const beforeCount = products.length;
+        products = products.filter(p => {
+          const publications = p.resourcePublicationsV2?.edges || [];
+          return publications.some(pub =>
+            pub.node?.isPublished && countryPublicationIds.includes(pub.node?.publication?.id)
+          );
+        });
+        const filtered = beforeCount - products.length;
+        if (filtered > 0) {
+          console.log(`Filtered out ${filtered} products not available in market for ${countryUpper}`);
+        }
+      }
+    }
 
     // Estrai info promo
     const promoName = metaobject.fields?.find(f => f.key === 'name')?.value;
