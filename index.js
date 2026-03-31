@@ -776,9 +776,28 @@ app.get('/api/composer/products', async (req, res) => {
       }
     }
 
+    // Risolvi la publication del market per il country (se specificato)
+    let marketPublicationId = null;
+    if (country) {
+      const countryUpper = country.toUpperCase();
+      const marketPubs = await getMarketPublications();
+      const countryPubIds = marketPubs[countryUpper];
+      if (countryPubIds && countryPubIds.length > 0) {
+        marketPublicationId = countryPubIds[0];
+      }
+    }
+
     // Query GraphQL con inventoryLevels per availability reale per location
+    // Se abbiamo una publication del market, aggiungiamo publishedOnPublication per filtrare
+    const publishedField = marketPublicationId
+      ? 'publishedOnMarket: publishedOnPublication(publicationId: $publicationId)'
+      : '';
+    const queryVars = marketPublicationId
+      ? '$handle: String!, $publicationId: ID!'
+      : '$handle: String!';
+
     const query = `
-      query GetPromoProducts($handle: String!) {
+      query GetPromoProducts(${queryVars}) {
         metaobjectByHandle(handle: {type: "promozione", handle: $handle}) {
           id
           handle
@@ -809,16 +828,7 @@ app.get('/api/composer/products', async (req, res) => {
                         currencyCode
                       }
                     }
-                    resourcePublicationsV2(first: 20) {
-                      edges {
-                        node {
-                          publication {
-                            id
-                          }
-                          isPublished
-                        }
-                      }
-                    }
+                    ${publishedField}
                     variants(first: 20) {
                       edges {
                         node {
@@ -855,7 +865,12 @@ app.get('/api/composer/products', async (req, res) => {
       }
     `;
 
-    const data = await shopifyGraphQL(query, { handle: promo_id });
+    const variables = { handle: promo_id };
+    if (marketPublicationId) {
+      variables.publicationId = marketPublicationId;
+    }
+
+    const data = await shopifyGraphQL(query, variables);
 
     if (data.errors) {
       return res.status(400).json({ errors: data.errors });
@@ -878,23 +893,12 @@ app.get('/api/composer/products', async (req, res) => {
       ?.filter(p => p && p.id) || [];
 
     // Filtra prodotti per market/country: solo quelli pubblicati nel market del paese richiesto
-    if (country) {
-      const countryUpper = country.toUpperCase();
-      const marketPubs = await getMarketPublications();
-      const countryPublicationIds = marketPubs[countryUpper];
-
-      if (countryPublicationIds && countryPublicationIds.length > 0) {
-        const beforeCount = products.length;
-        products = products.filter(p => {
-          const publications = p.resourcePublicationsV2?.edges || [];
-          return publications.some(pub =>
-            pub.node?.isPublished && countryPublicationIds.includes(pub.node?.publication?.id)
-          );
-        });
-        const filtered = beforeCount - products.length;
-        if (filtered > 0) {
-          console.log(`Filtered out ${filtered} products not available in market for ${countryUpper}`);
-        }
+    if (marketPublicationId) {
+      const beforeCount = products.length;
+      products = products.filter(p => p.publishedOnMarket === true);
+      const filtered = beforeCount - products.length;
+      if (filtered > 0) {
+        console.log(`Filtered out ${filtered} products not available in market for ${country.toUpperCase()}`);
       }
     }
 
