@@ -261,7 +261,7 @@ function verifyHmac(query) {
 
 // Step 1: Inizia il flusso OAuth
 app.get('/auth', (req, res) => {
-  const scopes = 'read_products,read_metaobjects,read_customers,read_orders,read_inventory,read_locations,read_publications';
+  const scopes = 'read_products,read_metaobjects,read_customers,read_orders,read_inventory,read_locations,read_publications,read_markets';
   const baseUrl = APP_URL || `http://localhost:${PORT}`;
   const redirectUri = `${baseUrl}/auth/callback`;
   const nonce = crypto.randomBytes(16).toString('hex');
