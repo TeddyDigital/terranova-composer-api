@@ -663,6 +663,43 @@ app.get('/api/debug/markets', async (req, res) => {
   const { product_id } = req.query;
 
   try {
+    // Query raw dei markets per debug
+    const marketsQuery = `
+      query GetMarkets {
+        markets(first: 50) {
+          edges {
+            node {
+              id
+              name
+              enabled
+              regions(first: 50) {
+                edges {
+                  node {
+                    ... on MarketRegionCountry {
+                      code
+                      name
+                    }
+                  }
+                }
+              }
+              catalogs(first: 5) {
+                edges {
+                  node {
+                    id
+                    publication {
+                      id
+                      name
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const marketsRaw = await shopifyGraphQL(marketsQuery);
+
     const marketPubs = await getMarketPublications();
 
     let productPublications = null;
@@ -692,6 +729,7 @@ app.get('/api/debug/markets', async (req, res) => {
     }
 
     res.json({
+      marketsRaw: marketsRaw.data?.markets || marketsRaw.errors || marketsRaw,
       marketPublicationsByCountry: marketPubs,
       product: productPublications
     });
