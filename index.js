@@ -822,6 +822,15 @@ app.get('/api/composer/products', async (req, res) => {
                     colore: metafield(namespace: "custom", key: "colore") {
                       value
                     }
+                    sesso: metafield(namespace: "custom", key: "sesso") {
+                      value
+                    }
+                    categoriaCommerciale: metafield(namespace: "custom", key: "categoria_commerciale") {
+                      value
+                    }
+                    tipoProdottoCommerciale: metafield(namespace: "custom", key: "tipo_prodotto_commerciale") {
+                      value
+                    }
                     priceRange {
                       minVariantPrice {
                         amount
@@ -916,6 +925,9 @@ app.get('/api/composer/products', async (req, res) => {
         handle: p.handle,
         modello: p.modello?.value || null,
         colore: p.colore?.value || null,
+        sesso: p.sesso?.value || null,
+        categoriaCommerciale: p.categoriaCommerciale?.value || null,
+        tipoProdottoCommerciale: p.tipoProdottoCommerciale?.value || null,
         image: p.featuredImage?.url,
         price: p.priceRange?.minVariantPrice,
         variants: p.variants?.edges?.map(v => {
